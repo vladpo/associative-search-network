@@ -1,7 +1,8 @@
 module Main where
 
-import ASN
-import AdaptiveElement
+import AssociativeSearchNetwork
 
 main :: IO ()
-main = print "hello"
+main = do
+  ws <- fig12
+  print ws

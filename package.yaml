@@ -21,6 +21,7 @@ description:         Please see the README on GitHub at <https://github.com/gith
 
 dependencies:
 - base >= 4.7 && < 5
+- random >= 1.1
 - mwc-random >= 0.14.0.0
 - MonadRandom >= 0.5.1.1
 - transformers >= 0.5.5.0

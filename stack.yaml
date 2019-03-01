@@ -39,6 +39,7 @@ packages:
 # (e.g., acme-missiles-0.3)
 extra-deps:
 #- primitive-0.6.4.0
+- random-1.1
 - mwc-random-0.14.0.0
 - MonadRandom-0.5.1.1
 - transformers-0.5.5.0
