@@ -16,7 +16,6 @@ type Weight = Double
 type Input = Double
 type InTrace = Double
 type Output = Double
-type AdaptiveElement = [Weight]
 
 data Env = Env { mean :: Double
                , stDev :: Double
@@ -24,9 +23,9 @@ data Env = Env { mean :: Double
                , lr :: Double
                , signals :: [(SignalGen, Weight -> Weight)]
                }
-data AdaptiveElement = AE { weights :: [Wieght]
+data AdaptiveElement = AE { weights :: [Weight]
                           , inputTraces :: [InTrace]
-                          , ouput :: Double
+                          , output :: Double
                           , prevOutput :: Double
                           }
 
@@ -102,26 +101,6 @@ repl a = do
   sgs <- asks signals
   return $ replicate (length sgs) a
 
-adapt :: RandomGen g => Double -> TimeStamp -> Stack g (TimeStamp, [Weight])
-adapt envResp t = do
-  ws <- repl 0.0
-  xts <- repl 0.0
-  loop 0 ws xts 0.0 0.0 0.0
-  where
-    
-    loop :: RandomGen g => TimeStamp -> [Weight] -> [InTrace] -> Double -> Double -> Double -> Stack g (TimeStamp, [Weight])
-    loop t ws0 xts0 y2 y1 y0 = do
-      xs0 <- inputs (t-1)
-      xts1 <- calcInputTraces xts0 $ debug xs0
-      xs <- inputs t
-      ny <- calcOutput ws0 $ debug xs
-      (f, h) <- asks $ until &&& output
-      ws1 <- calcWeights ws0 xts0 envResp $ h (y1 - y0)
-      if f (t, ws1) then
-        return (t, ws1)
-      else
-         loop (t+1) ws1 xts1 (debugD ny) (debugD y2) (debugD y1)
-
 inputs :: RandomGen g => TimeStamp -> Stack g [Input]
 inputs t = do
   sgs <- asks signals
@@ -165,10 +144,10 @@ initAE =
   in AE { weights = ds
         , inputTraces = ds
         , output = 0.0
-        , preOutput = 0.0
+        , prevOutput = 0.0
         }
 
-asn :: Env -> Int -> ((TimeStamp, [AdaptiveElement]) -> Bool) -> IO [AdaptiveElement]
+asn :: Env -> Int -> ((TimeStamp, [AdaptiveElement]) -> Bool) -> IO (TimeStamp, [AdaptiveElement])
 asn env n f = do
   gen <- newStdGen
   return $ runReader (flip evalRandT gen $ search 0 (pure $ replicate n initAE)) env
@@ -195,7 +174,9 @@ signalGen delay d td t = if t >= 0 && t' >= delay && t' <= delay+(d-1) then ON e
   where t' = t `mod` td
 
 fig12 :: IO (TimeStamp, [Weight])
-fig12 = asn env 1 
+fig12 = do
+  (t, ws) <- asn env 1
+  return (t, head $ fmap weights ws)
   where
     env = Env { mean = 0.005
               , stDev = 0.03
