@@ -1,6 +1,8 @@
+{-# LANGUAGE TupleSections #-}
 module AssociativeSearchNetwork ( fig12
                                 , Weight
                                 , TimeStamp
+                                , fig4
                                 ) where
 
 import Control.Applicative
@@ -17,33 +19,39 @@ type Input = Double
 type InTrace = Double
 type Output = Double
 
-data Env = Env { mean :: Double
-               , stDev :: Double
-               , alfa :: Double
-               , lr :: Double
-               , signals :: [(SignalGen, Weight -> Weight)]
-               }
-data AdaptiveElement = AE { weights :: [Weight]
-                          , inputTraces :: [InTrace]
-                          , output :: Double
-                          , prevOutput :: Double
+data Configs = C { mean :: !Double
+                 , stDev :: !Double
+                 , distribution :: ![(Double, Rational)]
+                 , alfa :: !Double
+                 , signals :: ![(SignalGen, Weight -> Weight)]
+                 , environment :: TimeStamp -> [Double] -> Double
+                 }
+data AdaptiveElement = AE { weights :: ![Weight]
+                          , inputTraces :: ![InTrace]
+                          , lRate :: TimeStamp -> Double
+                          , output :: !Double
+                          , prevOutput :: !Double
                           }
 
 data Signal = ON | OFF deriving Show
 type TimeStamp = Int
 type SignalGen = TimeStamp -> Signal
-type Stack g a = RandT g (Reader Env) a
+type Stack g a = RandT g (Reader Configs) a
 
 printD :: Double -> String 
 printD = printf "%.4f"
 
-debug :: [Double] -> [Double]
-debug xs | trace (foldl (\s d -> s ++ printD d ++ ", ") "[" xs ++ "]") False = undefined
-debug xs = xs
+debug :: String -> [Double] -> [Double]
+debug l xs | trace (l ++ foldl (\s d -> s ++ printD d ++ ", ") "[" xs ++ "]") False = undefined
+debug l xs = xs
 
-debugD :: Double -> Double
-debugD d | trace (printD d) False = undefined
-debugD d = d
+debugD :: String -> Double -> Double
+debugD l d | trace (l ++ printD d) False = undefined
+debugD l d = d
+
+debugS :: Show a => String ->  a -> a
+debugS l d | trace (l ++ show d) False = undefined
+debugS l d = d
 
 positive :: Double -> Double
 positive v
@@ -51,27 +59,32 @@ positive v
   | otherwise = 0.0
 
 normal :: Double -> Double -> [(Double, Rational)]
-normal m sd = loop 1.0 $ negate r
+normal m sd = loop 1 $ negate r
   where
-    r = 3.0*sd
-    loop :: Rational -> Double -> [(Double, Rational)]
+    r = 2.0*sd
+    step :: Int -> Int
+    step n = div n 50 + 1
+    loop :: Int -> Double -> [(Double, Rational)]
     loop n v
-      | v <= m = (v, n) : loop (n+1) (v + 0.001)
-      | v > m && v <= r = (v, n) : loop (n-1) (v + 0.001)
+      | v <= m = (v, toRational n) : loop (n + step n) (v + 0.001)
+      | v > m && v <= r = (v, toRational n) : loop (n - step n) (v + 0.001)
       | v > r = []
 
 noise :: RandomGen g => Input -> Stack g Double
 noise x = do
-  (m, sd) <- asks $ mean &&& stDev
-  n <- fromList $ normal m sd
+  d <- asks distribution
+  n <- fromList d
   return $  min 1.0 (max 0.0 (x + n))
 
-calcOutput :: [Input] -> [Weight] -> Stack g Double
-calcOutput xs ws = return $ positive (sum ws xs 0.0)
+sumProds :: [Double] -> [Double] -> Double
+sumProds xs ys = loop xs ys 0.0
   where
-    sum :: [Weight] -> [Input] -> Double ->  Double
-    sum [] [] s = s
-    sum (w:ws) (x:xs) s = sum ws xs (s + w*x)
+    loop :: [Double] -> [Double] -> Double ->  Double
+    loop [] [] s = s
+    loop (w:ws) (x:xs) s = loop ws xs (s + w*x)
+
+calcOutput :: [Input] -> [Weight] -> Stack g Double
+calcOutput xs ws = return $ positive $ sumProds ws xs
 
 calcInputTraces :: [Input] -> [InTrace] -> Stack g [Double]
 calcInputTraces xs xts = do
@@ -86,14 +99,14 @@ toDouble :: Signal -> Double
 toDouble ON = 1.0
 toDouble OFF = 0.0
 
-calcWeights :: AdaptiveElement -> Double -> Stack g [Weight]
-calcWeights ae envResp = do
-  (c, fs) <- asks $ lr &&& fmap snd . signals
+calcWeights :: AdaptiveElement -> Double -> TimeStamp -> Stack g [Weight]
+calcWeights ae zDiff t = do
+  fs <- asks $ fmap snd . signals
   let
     yDiff = output ae - prevOutput ae
     loop :: [Weight] -> [InTrace] -> [Weight -> Weight] -> [Weight]
     loop [] [] [] = []
-    loop (w:ws) (xt:xts) (f:fs) = f (w + c*envResp*yDiff*xt) : loop ws xts fs
+    loop (w:ws) (xt:xts) (f:fs) = f (w + lRate ae t *zDiff*yDiff*xt) : loop ws xts fs
   return $ loop (weights ae) (inputTraces ae) fs
 
 repl :: a -> Stack g [a]
@@ -108,66 +121,97 @@ inputs t = do
   sequence $ fmap noise xs
 
 adapt :: RandomGen g => Double -> TimeStamp -> AdaptiveElement -> Stack g AdaptiveElement
-adapt envResp t ae = do
+adapt zDiff t ae = do
   xs <- inputs (t-1)
-  xts <- calcInputTraces xs $ inputTraces ae
+  xts <- calcInputTraces (debug "xs = " xs) $ inputTraces ae
   xs' <- inputs t
-  y <- calcOutput xs' $ weights ae
-  ws <- calcWeights ae envResp
+  y <- calcOutput (debug "xs' = " xs') $ weights ae
+  ws <- calcWeights ae zDiff t
   return AE { weights = ws
             , inputTraces = xts
-            , output = y
+            , output = debugD "y = " y
             , prevOutput = output ae
+            , lRate = lRate ae
             }
 
-predictor :: RandomGen g => [SignalGen] -> Double -> [Weight] -> Stack g Double
-predictor sgs z ws = adapt z
-  where
-    env = Env { mean = 0.0
-              , stDev = 0.01
-              , alfa = 0.0
-              , lr = 0.1
-              , signals = sgs
-              , output = const 1.0
-              , until = undefined
-              }
-
-envFunc :: [Output] -> Double
-envFunc ys = undefined
-
-envResp :: [AdaptiveElement] -> Double
-envResp = envFunc . fmap output
-
-initAE :: AdaptiveElement
-initAE = 
-  let ds = repl 0.0
+initAE :: Int -> (TimeStamp -> Double) -> AdaptiveElement
+initAE n lr = 
+  let ds = replicate n 0.0
   in AE { weights = ds
         , inputTraces = ds
+        , lRate = lr
         , output = 0.0
         , prevOutput = 0.0
         }
 
-asn :: Env -> Int -> ((TimeStamp, [AdaptiveElement]) -> Bool) -> IO (TimeStamp, [AdaptiveElement])
-asn env n f = do
+asn :: Configs -> [AdaptiveElement] -> ((TimeStamp, [AdaptiveElement]) -> Bool) -> IO ([(TimeStamp, Double)], [AdaptiveElement])
+asn cs aes until = do
   gen <- newStdGen
-  return $ runReader (flip evalRandT gen $ search 0 (pure $ replicate n initAE)) env
+  return $ runReader (flip evalRandT gen $ search 0 $ pure([],aes)) cs
     where
-      search ::  RandomGen g => (TimeStamp, Stack g [AdaptiveElement]) -> Stack g (TimeStamp, [AdaptiveElement])
-      search (t, maes) = do
-        aes <- maes
-        z <- envResp aes
-        let r = (t, aes)
-        if f r then
-          return r
+      search :: RandomGen g => TimeStamp -> Stack g ([(TimeStamp, Double)], [AdaptiveElement]) -> Stack g ([(TimeStamp, Double)], [AdaptiveElement])
+      search t mRes = do
+        env <- asks environment
+        (ts, aes) <- mRes
+        let 
+          z = env t (fmap output aes)
+          ts' = (t, z):ts
+          zDiff = z - env (t-1) (fmap prevOutput aes)
+        if until (t, aes) then
+          return (ts', aes)
         else
-          search (t+1, forM aes $ adapt z t)
-    
+          search (t+1) $ fmap (ts',) $ forM aes $ adapt zDiff t
 
-untilTS :: TimeStamp -> (TimeStamp, [Weight]) -> Bool
+asnReset :: Int -> [SignalGen] -> (TimeStamp -> [Output] -> Double) -> IO [(TimeStamp, Double)]
+asnReset n sgs env = fmap fst $ asn cs aes $ untilTS 500
+  where
+    cs = C { mean = 0.0
+           , stDev = 0.1
+           , distribution = normal 0.0 0.1
+           , alfa = 0.0
+           , signals = fmap (,id) sgs
+           , environment = env
+           }
+    resetLr t 
+      | t `mod` 10 == 0 = 0.0
+      | otherwise = 0.03
+    aes = replicate n $ initAE (length sgs) resetLr
+
+contextSwitch :: a -> a -> TimeStamp -> a
+contextSwitch v1 v2 t
+  | t < 0 || div t 10 `mod` 2 == 0 = v1
+  | otherwise = v2
+
+fig4 :: IO [(TimeStamp, Double)]
+fig4 = asnReset 9 signalSwitchs env
+  where
+    env t ys =
+      let z = sumProds ys
+      in contextSwitch (z [-1,1,1,1,-1,1,1,1,-1]) (z [1,1,-1,-1,1,-1,-1,1,1]) t
+    xs = replicate 4 ON ++ replicate 4 OFF
+    xs' = reverse xs
+    signalSwitch (x,x') = contextSwitch x x'
+    signalSwitchs = signalSwitch <$> zip xs xs'
+
+{-asnWithPred :: Int 
+asnWithPred n = asn cs 
+  where
+    cs = C { mean = 0.0
+           , stDev = 0.1
+           , alfa = 0.0
+          , signals = sgs
+           , 
+           }
+    p = initAE 0.1
+    aes = p : replicate n $ initAE $ const 0.03
+-}
+
+untilTS :: TimeStamp -> (TimeStamp, [AdaptiveElement]) -> Bool
 untilTS t (t', _) = t == t'
 
-untilAvgW :: Weight -> (TimeStamp, [Weight]) -> Bool
-untilAvgW w (_, ws) =  sum ws / fromIntegral (length ws) >= w
+untilAvgW :: Weight -> (TimeStamp, [AdaptiveElement]) -> Bool
+untilAvgW w (_, aes) =  sum ws / fromIntegral (length ws) >= w
+  where ws = join $ fmap weights aes
 
 signalGen :: Int -> Int -> Int -> TimeStamp -> Signal
 signalGen delay d td t = if t >= 0 && t' >= delay && t' <= delay+(d-1) then ON else OFF
@@ -175,15 +219,17 @@ signalGen delay d td t = if t >= 0 && t' >= delay && t' <= delay+(d-1) then ON e
 
 fig12 :: IO (TimeStamp, [Weight])
 fig12 = do
-  (t, ws) <- asn env 1
-  return (t, head $ fmap weights ws)
+  (ts, ws) <- asn cs [initAE (length sgs) $ const 0.2] $ untilAvgW 0.6
+  return (fst $ head ts, head $ fmap weights ws)
   where
-    env = Env { mean = 0.005
-              , stDev = 0.03
-              , alfa = 0.9
-              , lr = 0.2
-              , signals = outSigGen:inSigGen
-              }
     td = 3+20+27
     inSigGen = replicate 4 (signalGen 0 3 td, id)
     outSigGen = (signalGen 3 20 td, const 0.6)
+    sgs = outSigGen:inSigGen
+    cs = C { mean = 0.005
+           , stDev = 0.03
+           , distribution = normal 0.005 0.03
+           , alfa = 0.9
+           , signals = sgs
+           , environment = const $ const 1.0
+           }
