@@ -31,6 +31,7 @@ data AdaptiveElement = AE { weights :: ![Weight]
                           , lRate :: TimeStamp -> Double
                           , output :: !Double
                           , prevOutput :: !Double
+                          , prevPrevOutput :: !Double
                           }
 
 data Signal = ON | OFF deriving Show
@@ -41,13 +42,13 @@ type Stack g a = RandT g (Reader Configs) a
 printD :: Double -> String 
 printD = printf "%.4f"
 
-debug :: String -> [Double] -> [Double]
-debug l xs | trace (l ++ foldl (\s d -> s ++ printD d ++ ", ") "[" xs ++ "]") False = undefined
-debug l xs = xs
+debug :: [Double] -> String -> [Double]
+debug xs l | trace (l ++ foldl (\s d -> s ++ printD d ++ ", ") "[" xs ++ "]") False = undefined
+debug xs l = xs
 
-debugD :: String -> Double -> Double
-debugD l d | trace (l ++ printD d) False = undefined
-debugD l d = d
+debugD :: Double -> String -> Double
+debugD d l | trace (l ++ printD d) False = undefined
+debugD d l = d
 
 debugS :: Show a => String ->  a -> a
 debugS l d | trace (l ++ show d) False = undefined
@@ -70,11 +71,11 @@ normal m sd = loop 1 $ negate r
       | v > m && v <= r = (v, toRational n) : loop (n - step n) (v + 0.001)
       | v > r = []
 
-noise :: RandomGen g => Input -> Stack g Double
-noise x = do
+noise :: RandomGen g => Output -> Stack g Double
+noise y = do
   d <- asks distribution
   n <- fromList d
-  return $  min 1.0 (max 0.0 (x + n))
+  return $ y + n
 
 sumProds :: [Double] -> [Double] -> Double
 sumProds xs ys = loop xs ys 0.0
@@ -83,8 +84,10 @@ sumProds xs ys = loop xs ys 0.0
     loop [] [] s = s
     loop (w:ws) (x:xs) s = loop ws xs (s + w*x)
 
-calcOutput :: [Input] -> [Weight] -> Stack g Double
-calcOutput xs ws = return $ positive $ sumProds ws xs
+calcOutput :: RandomGen g => [Input] -> [Weight] -> Stack g Double
+calcOutput xs ws = do
+  y <- noise $ sumProds ws xs
+  return $ positive y
 
 calcInputTraces :: [Input] -> [InTrace] -> Stack g [Double]
 calcInputTraces xs xts = do
@@ -99,38 +102,47 @@ toDouble :: Signal -> Double
 toDouble ON = 1.0
 toDouble OFF = 0.0
 
-calcWeights :: AdaptiveElement -> Double -> TimeStamp -> Stack g [Weight]
-calcWeights ae zDiff t = do
-  fs <- asks $ fmap snd . signals
-  let
-    yDiff = output ae - prevOutput ae
-    loop :: [Weight] -> [InTrace] -> [Weight -> Weight] -> [Weight]
-    loop [] [] [] = []
-    loop (w:ws) (xt:xts) (f:fs) = f (w + lRate ae t *zDiff*yDiff*xt) : loop ws xts fs
-  return $ loop (weights ae) (inputTraces ae) fs
-
 repl :: a -> Stack g [a]
 repl a = do 
   sgs <- asks signals
   return $ replicate (length sgs) a
 
-inputs :: RandomGen g => TimeStamp -> Stack g [Input]
+inputs :: TimeStamp -> Stack g [Input]
 inputs t = do
   sgs <- asks signals
-  let xs = fmap (toDouble . ($ t) . fst) sgs
-  sequence $ fmap noise xs
+  return $ fmap (toDouble . ($ t) . fst) sgs
 
-adapt :: RandomGen g => Double -> TimeStamp -> AdaptiveElement -> Stack g AdaptiveElement
-adapt zDiff t ae = do
+tl :: String -> TimeStamp -> String
+tl pre t = pre ++ "(" ++ show t ++ ") = "
+
+adaptOutput :: RandomGen g => TimeStamp -> AdaptiveElement -> Stack g AdaptiveElement
+adaptOutput t ae = do
   xs <- inputs (t-1)
-  xts <- calcInputTraces (debug "xs = " xs) $ inputTraces ae
+  xts <- calcInputTraces xs $ inputTraces ae
   xs' <- inputs t
-  y <- calcOutput (debug "xs' = " xs') $ weights ae
-  ws <- calcWeights ae zDiff t
-  return AE { weights = ws
+  y <- calcOutput xs $ weights ae
+  return AE { weights = weights ae
             , inputTraces = xts
-            , output = debugD "y = " y
+            , output = y
             , prevOutput = output ae
+            , prevPrevOutput = prevOutput ae
+            , lRate = lRate ae
+            }
+
+adaptWeight :: Double -> TimeStamp -> AdaptiveElement -> Stack g AdaptiveElement
+adaptWeight zDiff t ae = do
+  fs <- asks $ fmap snd . signals
+  let
+    yDiff = prevOutput ae - prevPrevOutput ae
+    loop :: [Weight] -> [InTrace] -> [Weight -> Weight] -> [Weight]
+    loop [] [] [] = []
+    loop (w:ws) (xt:xts) (f:fs) = f (w + lRate ae t *zDiff*yDiff*xt) : loop ws xts fs
+    ws = loop (weights ae) (inputTraces ae) fs
+  return AE { weights = ws
+            , inputTraces = inputTraces ae
+            , output = output ae
+            , prevOutput = prevOutput ae
+            , prevPrevOutput = prevPrevOutput ae
             , lRate = lRate ae
             }
 
@@ -142,28 +154,30 @@ initAE n lr =
         , lRate = lr
         , output = 0.0
         , prevOutput = 0.0
+        , prevPrevOutput = 0.0
         }
 
 asn :: Configs -> [AdaptiveElement] -> ((TimeStamp, [AdaptiveElement]) -> Bool) -> IO ([(TimeStamp, Double)], [AdaptiveElement])
 asn cs aes until = do
   gen <- newStdGen
-  return $ runReader (flip evalRandT gen $ search 0 $ pure([],aes)) cs
+  return $ runReader (flip evalRandT gen $ search 0 $ pure ([], aes)) cs
     where
       search :: RandomGen g => TimeStamp -> Stack g ([(TimeStamp, Double)], [AdaptiveElement]) -> Stack g ([(TimeStamp, Double)], [AdaptiveElement])
       search t mRes = do
         env <- asks environment
         (ts, aes) <- mRes
+        aes' <- forM aes $ adaptOutput t
         let 
-          z = env t (fmap output aes)
+          z = env t (fmap output aes')
+          zDiff = z - env (t-1) (fmap prevOutput aes')
           ts' = (t, z):ts
-          zDiff = z - env (t-1) (fmap prevOutput aes)
-        if until (t, aes) then
+        if until (t, aes') then
           return (ts', aes)
         else
-          search (t+1) $ fmap (ts',) $ forM aes $ adapt zDiff t
+          search (t+1) $ fmap (ts',) $ forM aes' $ adaptWeight zDiff t
 
 asnReset :: Int -> [SignalGen] -> (TimeStamp -> [Output] -> Double) -> IO [(TimeStamp, Double)]
-asnReset n sgs env = fmap fst $ asn cs aes $ untilTS 500
+asnReset n sgs env = fmap fst $ asn cs aes $ untilTS 800
   where
     cs = C { mean = 0.0
            , stDev = 0.1
@@ -172,8 +186,8 @@ asnReset n sgs env = fmap fst $ asn cs aes $ untilTS 500
            , signals = fmap (,id) sgs
            , environment = env
            }
-    resetLr t 
-      | t `mod` 10 == 0 = 0.0
+    resetLr t
+      | t > 1 && t `mod` 10 == 1 = 0.0
       | otherwise = 0.03
     aes = replicate n $ initAE (length sgs) resetLr
 
@@ -183,7 +197,7 @@ contextSwitch v1 v2 t
   | otherwise = v2
 
 fig4 :: IO [(TimeStamp, Double)]
-fig4 = asnReset 9 signalSwitchs env
+fig4 = asnReset 9 signalSwitches env
   where
     env t ys =
       let z = sumProds ys
@@ -191,7 +205,7 @@ fig4 = asnReset 9 signalSwitchs env
     xs = replicate 4 ON ++ replicate 4 OFF
     xs' = reverse xs
     signalSwitch (x,x') = contextSwitch x x'
-    signalSwitchs = signalSwitch <$> zip xs xs'
+    signalSwitches = signalSwitch <$> zip xs xs'
 
 {-asnWithPred :: Int 
 asnWithPred n = asn cs 
