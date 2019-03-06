@@ -71,7 +71,7 @@ normal m sd = loop 1 $ negate r
       | v > m && v <= r = (v, toRational n) : loop (n - step n) (v + 0.001)
       | v > r = []
 
-noise :: RandomGen g => Output -> Stack g Double
+noise :: RandomGen g => Double -> Stack g Double
 noise x = do
   d <- asks distribution
   n <- fromList d
@@ -86,8 +86,8 @@ sumProds xs ys = loop xs ys 0.0
 
 calcOutput :: RandomGen g => [Input] -> [Weight] -> Stack g Double
 calcOutput xs ws = do
-  y <- noise $ sumProds ws xs
-  return $ positive y
+  ws' <- sequence $ fmap noise ws
+  return . positive $ sumProds ws' xs
 
 calcInputTraces :: [Input] -> [InTrace] -> Stack g [Double]
 calcInputTraces xs xts = do
@@ -174,9 +174,9 @@ initAE n lr =
         , prevOutput = 0.0
         , prevPrevOutput = 0.0
         }
-        
+
 asnReset :: Int -> [SignalGen] -> (TimeStamp -> [Output] -> Double) -> IO [(TimeStamp, Double)]
-asnReset n sgs env = fmap fst $ asn cs aes $ untilTS 1000
+asnReset n sgs env = fmap fst $ asn cs aes $ untilTS 200
   where
     cs = C { mean = 0.0
            , stDev = 0.1
